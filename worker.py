@@ -1,8 +1,8 @@
 import os
 import time
 import logging
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from supabase import create_client, Client
 from scraper import OnlyFansScraper
 
 logging.basicConfig(
@@ -16,27 +16,52 @@ class SupabaseWorker:
         self.supabase_url = os.getenv('SUPABASE_URL', '').strip()
         self.supabase_key = os.getenv('SUPABASE_KEY', '').strip()
 
-        logger.info(f"DEBUG: SUPABASE_URL length={len(self.supabase_url)}, starts with https: {self.supabase_url.startswith('https')}")
-        logger.info(f"DEBUG: SUPABASE_KEY length={len(self.supabase_key)}, starts with eyJ: {self.supabase_key.startswith('eyJ')}")
-
         if not self.supabase_url or not self.supabase_key:
             raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
 
         logger.info(f"Connecting to Supabase: {self.supabase_url}")
-        self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
-        logger.info("Supabase client created successfully")
+        self.headers = {
+            'Authorization': f'Bearer {self.supabase_key}',
+            'Content-Type': 'application/json'
+        }
         self.scraper = OnlyFansScraper()
         self.max_workers = int(os.getenv('MAX_WORKERS', 10))
         self.batch_size = int(os.getenv('BATCH_SIZE', 50))
+        logger.info("Supabase connection initialized")
 
     def get_pending_jobs(self, limit: int = 50) -> list:
-        """Fetch pending jobs from Supabase"""
+        """Fetch pending jobs from Supabase REST API"""
         try:
-            response = self.supabase.table('scrape_jobs').select('id, username').eq('status', 'pending').limit(limit).execute()
-            return response.data if response.data else []
+            url = f"{self.supabase_url}/rest/v1/scrape_jobs?status=eq.pending&limit={limit}"
+            response = requests.get(url, headers=self.headers)
+            response.raise_for_status()
+            return response.json() if response.json() else []
         except Exception as e:
             logger.error(f"Error fetching jobs: {str(e)}")
             return []
+
+    def update_job_status(self, job_id: int, status: str, **kwargs) -> bool:
+        """Update job status via REST API"""
+        try:
+            url = f"{self.supabase_url}/rest/v1/scrape_jobs?id=eq.{job_id}"
+            data = {'status': status, **kwargs}
+            response = requests.patch(url, json=data, headers=self.headers)
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating job {job_id}: {str(e)}")
+            return False
+
+    def insert_result(self, result_data: dict) -> bool:
+        """Insert result via REST API"""
+        try:
+            url = f"{self.supabase_url}/rest/v1/scrape_results"
+            response = requests.post(url, json=result_data, headers=self.headers)
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Error inserting result: {str(e)}")
+            return False
 
     def process_job(self, job: dict) -> bool:
         """Process a single job"""
@@ -45,17 +70,13 @@ class SupabaseWorker:
 
         try:
             # Update status to processing
-            self.supabase.table('scrape_jobs').update({'status': 'processing', 'started_at': 'now()'}).eq('id', job_id).execute()
+            self.update_job_status(job_id, 'processing')
 
             # Scrape profile
             result = self.scraper.scrape_profile(username)
 
             if result is None:
-                self.supabase.table('scrape_jobs').update({
-                    'status': 'failed',
-                    'error': 'Scraping failed',
-                    'completed_at': 'now()'
-                }).eq('id', job_id).execute()
+                self.update_job_status(job_id, 'failed', error='Scraping failed')
                 return False
 
             # Store results
@@ -71,33 +92,25 @@ class SupabaseWorker:
                 'reddit': result['links'].get('reddit'),
                 'github': result['links'].get('github'),
                 'linkedin': result['links'].get('linkedin'),
-                'website': result['links'].get('website'),
                 'raw_bio': result['bio'],
                 'job_id': job_id
             }
 
-            self.supabase.table('scrape_results').upsert(result_data).execute()
+            self.insert_result(result_data)
 
             # Mark job as completed
-            self.supabase.table('scrape_jobs').update({
-                'status': 'completed',
-                'completed_at': 'now()'
-            }).eq('id', job_id).execute()
+            self.update_job_status(job_id, 'completed')
 
             logger.info(f"Completed job {job_id}: {username}")
             return True
 
         except Exception as e:
             logger.error(f"Error processing job {job_id}: {str(e)}")
-            self.supabase.table('scrape_jobs').update({
-                'status': 'failed',
-                'error': str(e),
-                'completed_at': 'now()'
-            }).eq('id', job_id).execute()
+            self.update_job_status(job_id, 'failed', error=str(e))
             return False
 
     def run_worker(self):
-        """Main worker loop - continuously process jobs"""
+        """Main worker loop"""
         logger.info(f"Worker started with {self.max_workers} parallel threads")
 
         while True:
