@@ -13,13 +13,18 @@ logger = logging.getLogger(__name__)
 
 class SupabaseWorker:
     def __init__(self):
-        self.supabase_url = os.getenv('SUPABASE_URL')
-        self.supabase_key = os.getenv('SUPABASE_KEY')
+        self.supabase_url = os.getenv('SUPABASE_URL', '').strip()
+        self.supabase_key = os.getenv('SUPABASE_KEY', '').strip()
+
+        logger.info(f"DEBUG: SUPABASE_URL length={len(self.supabase_url)}, starts with https: {self.supabase_url.startswith('https')}")
+        logger.info(f"DEBUG: SUPABASE_KEY length={len(self.supabase_key)}, starts with eyJ: {self.supabase_key.startswith('eyJ')}")
 
         if not self.supabase_url or not self.supabase_key:
             raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
 
+        logger.info(f"Connecting to Supabase: {self.supabase_url}")
         self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
+        logger.info("Supabase client created successfully")
         self.scraper = OnlyFansScraper()
         self.max_workers = int(os.getenv('MAX_WORKERS', 10))
         self.batch_size = int(os.getenv('BATCH_SIZE', 50))
@@ -62,6 +67,10 @@ class SupabaseWorker:
                 'telegram': result['links'].get('telegram'),
                 'youtube': result['links'].get('youtube'),
                 'snapchat': result['links'].get('snapchat'),
+                'twitch': result['links'].get('twitch'),
+                'reddit': result['links'].get('reddit'),
+                'github': result['links'].get('github'),
+                'linkedin': result['links'].get('linkedin'),
                 'website': result['links'].get('website'),
                 'raw_bio': result['bio'],
                 'job_id': job_id
@@ -110,7 +119,7 @@ class SupabaseWorker:
                     except Exception as e:
                         logger.error(f"Unexpected error: {str(e)}")
 
-            time.sleep(1)  # Small delay before next batch
+            time.sleep(1)
 
 if __name__ == '__main__':
     worker = SupabaseWorker()
